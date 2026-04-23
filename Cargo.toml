@@ -1,0 +1,9 @@
+[package]
+name = "maker_header_gen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+md5 = "0.7"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
