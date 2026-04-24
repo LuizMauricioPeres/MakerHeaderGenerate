@@ -2,11 +2,7 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-mod analyser;
-mod emitter;
-mod types;
-
-use analyser::analyse_file;
+use maker_header_gen::{analyse_file, render_stdout, write_mkh};
 
 /// Gera arquivos .mkh de manifesto de símbolos para fontes Harbour (.prg)
 #[derive(Parser, Debug)]
@@ -47,9 +43,9 @@ fn process(path: &Path, verbose: bool) {
     match analyse_file(path) {
         Ok(manifest) => {
             if verbose {
-                println!("{}", emitter::render_stdout(&manifest));
+                println!("{}", render_stdout(&manifest));
             }
-            match emitter::write_mkh(path, &manifest) {
+            match write_mkh(path, &manifest) {
                 Ok(out) => println!("[ok] {}", out.display()),
                 Err(e) => eprintln!("[err] {}: {}", path.display(), e),
             }
