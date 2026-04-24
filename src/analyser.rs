@@ -440,3 +440,203 @@ fn is_keyword(s: &str) -> bool {
             | "GOTO" | "STORE" | "COPY" | "CLOSE" | "COMMIT" | "ROLLBACK"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_keyword_function() {
+        let input = "FUNCTION HelloWorld";
+        let result = parse_keyword(input, "FUNCTION");
+        assert_eq!(result, Some("HelloWorld".to_string()));
+    }
+
+    #[test]
+    fn test_parse_keyword_function_with_parens() {
+        let input = "FUNCTION HelloWorld()";
+        let result = parse_keyword(input, "FUNCTION");
+        assert_eq!(result, Some("HelloWorld".to_string()));
+    }
+
+    #[test]
+    fn test_parse_keyword_not_found() {
+        let input = "PROCEDURE HelloWorld";
+        let result = parse_keyword(input, "FUNCTION");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_method_simple() {
+        let input = "METHOD MyMethod";
+        let result = parse_method(input);
+        assert_eq!(result, Some("MyMethod".to_string()));
+    }
+
+    #[test]
+    fn test_parse_method_with_class() {
+        let input = "METHOD MyClass:MyMethod";
+        let result = parse_method(input);
+        assert_eq!(result, Some("MyClass:MyMethod".to_string()));
+    }
+
+    #[test]
+    fn test_parse_method_with_parens() {
+        let input = "METHOD MyClass:MyMethod()";
+        let result = parse_method(input);
+        assert_eq!(result, Some("MyClass:MyMethod".to_string()));
+    }
+
+    #[test]
+    fn test_parse_varlist_simple() {
+        let input = "PUBLIC x, y, z";
+        let result = parse_varlist(input);
+        assert_eq!(result, vec!["X", "Y", "Z"]);
+    }
+
+    #[test]
+    fn test_parse_varlist_with_init() {
+        let input = "PUBLIC nCounter := 0, cName := ''";
+        let result = parse_varlist(input);
+        assert_eq!(result, vec!["NCOUNTER", "CNAME"]);
+    }
+
+    #[test]
+    fn test_parse_varlist_with_array() {
+        let input = "PUBLIC aItems[10], aNames";
+        let result = parse_varlist(input);
+        assert_eq!(result, vec!["AITEMS", "ANAMES"]);
+    }
+
+    #[test]
+    fn test_parse_varlist_single() {
+        let input = "PUBLIC nCounter";
+        let result = parse_varlist(input);
+        assert_eq!(result, vec!["NCOUNTER"]);
+    }
+
+    #[test]
+    fn test_parse_class_var_exported() {
+        let input = "VAR myVar EXPORTED";
+        let result = parse_class_var(input);
+        assert_eq!(result, Some(("myVar".to_string(), Visibility::Exported)));
+    }
+
+    #[test]
+    fn test_parse_class_var_hidden() {
+        let input = "VAR myVar HIDDEN";
+        let result = parse_class_var(input);
+        assert_eq!(result, Some(("myVar".to_string(), Visibility::Hidden)));
+    }
+
+    #[test]
+    fn test_parse_class_var_protected() {
+        let input = "VAR myVar PROTECTED";
+        let result = parse_class_var(input);
+        assert_eq!(result, Some(("myVar".to_string(), Visibility::Protected)));
+    }
+
+    #[test]
+    fn test_parse_class_var_default() {
+        let input = "VAR myVar";
+        let result = parse_class_var(input);
+        assert_eq!(result, Some(("myVar".to_string(), Visibility::Exported)));
+    }
+
+    #[test]
+    fn test_strip_comment_cpp_style() {
+        let input = "some code // this is comment";
+        let result = strip_comment(input);
+        assert_eq!(result, "some code ");
+    }
+
+    #[test]
+    fn test_strip_comment_c_style() {
+        let input = "some code /* comment */ more";
+        let result = strip_comment(input);
+        assert_eq!(result, "some code ");
+    }
+
+    #[test]
+    fn test_strip_comment_no_comment() {
+        let input = "some code without comment";
+        let result = strip_comment(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_is_keyword_function() {
+        assert!(is_keyword("FUNCTION"));
+        assert!(is_keyword("PROCEDURE"));
+        assert!(is_keyword("CLASS"));
+        assert!(is_keyword("METHOD"));
+        assert!(is_keyword("PUBLIC"));
+    }
+
+    #[test]
+    fn test_is_keyword_negative() {
+        assert!(!is_keyword("MYFUNCTION"));
+        assert!(!is_keyword("UNKNOWN"));
+        assert!(!is_keyword(""));
+    }
+
+    #[test]
+    fn test_is_ident_start() {
+        assert!(is_ident_start(b'a'));
+        assert!(is_ident_start(b'Z'));
+        assert!(is_ident_start(b'_'));
+        assert!(!is_ident_start(b'0'));
+        assert!(!is_ident_start(b'('));
+    }
+
+    #[test]
+    fn test_is_ident_cont() {
+        assert!(is_ident_cont(b'a'));
+        assert!(is_ident_cont(b'Z'));
+        assert!(is_ident_cont(b'0'));
+        assert!(is_ident_cont(b'_'));
+        assert!(!is_ident_cont(b'('));
+        assert!(!is_ident_cont(b'.'));
+    }
+
+    #[test]
+    fn test_collect_calls_simple() {
+        let line = "FetchUser()";
+        let calls = collect_calls(line, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "FETCHUSER");
+        assert_eq!(calls[0].line, 1);
+    }
+
+    #[test]
+    fn test_collect_calls_multiple() {
+        let line = "x := DoThis() + DoThat()";
+        let calls = collect_calls(line, 5);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "DOTHIS");
+        assert_eq!(calls[1].name, "DOTHAT");
+    }
+
+    #[test]
+    fn test_collect_calls_with_args() {
+        let line = "Result := Process( x, y, z )";
+        let calls = collect_calls(line, 10);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "PROCESS");
+    }
+
+    #[test]
+    fn test_collect_calls_in_string() {
+        let line = r#"? "FakeCall()""#;
+        let calls = collect_calls(line, 1);
+        // Should not detect FakeCall inside string
+        assert!(calls.iter().all(|c| c.name != "FAKECALL"));
+    }
+
+    #[test]
+    fn test_collect_calls_no_parens() {
+        let line = "x := y + z";
+        let calls = collect_calls(line, 1);
+        assert_eq!(calls.len(), 0);
+    }
+}
