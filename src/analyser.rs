@@ -128,6 +128,9 @@ impl Parser {
 
             // ── FUNCTION ────────────────────────────────────────────────────
             if let Some(name) = parse_keyword(upper, "FUNCTION") {
+                if is_stub_body(&self.lines, line_idx + 1) {
+                    continue;
+                }
                 let scope = self.current_class.clone().unwrap_or_else(|| String::from("GLOBAL"));
                 let sym = Symbol {
                     name: name.clone(),
@@ -144,6 +147,9 @@ impl Parser {
 
             // ── PROCEDURE ───────────────────────────────────────────────────
             if let Some(name) = parse_keyword(upper, "PROCEDURE") {
+                if is_stub_body(&self.lines, line_idx + 1) {
+                    continue;
+                }
                 let scope = self.current_class.clone().unwrap_or_else(|| String::from("GLOBAL"));
                 let sym = Symbol {
                     name: name.clone(),
@@ -215,6 +221,9 @@ impl Parser {
 
             // ── STATIC FUNCTION ─────────────────────────────────────────────
             if let Some(name) = parse_static_keyword(upper, "FUNCTION") {
+                if is_stub_body(&self.lines, line_idx + 1) {
+                    continue;
+                }
                 let sym = Symbol {
                     name: name.clone(),
                     kind: SymbolKind::Function,
@@ -230,6 +239,9 @@ impl Parser {
 
             // ── STATIC PROCEDURE ────────────────────────────────────────────
             if let Some(name) = parse_static_keyword(upper, "PROCEDURE") {
+                if is_stub_body(&self.lines, line_idx + 1) {
+                    continue;
+                }
                 let sym = Symbol {
                     name: name.clone(),
                     kind: SymbolKind::Procedure,
@@ -463,6 +475,70 @@ fn parse_class_var(upper: &str) -> Option<(String, Visibility)> {
         Visibility::Exported
     };
     Some((name, vis))
+}
+
+/// Returns true if the body that starts at `start` (line index) is a stub:
+/// empty, or contains only a bare/fixed-literal RETURN before the next declaration.
+fn is_stub_body(lines: &[String], start: usize) -> bool {
+    let mut meaningful: Vec<String> = Vec::new();
+
+    for raw in lines.iter().skip(start) {
+        let trimmed = strip_comment(raw.trim());
+        let upper = trimmed.trim().to_ascii_uppercase();
+
+        if is_new_declaration(&upper) {
+            break;
+        }
+        // skip blank lines and preprocessor directives
+        if !upper.is_empty() && !upper.starts_with('#') {
+            meaningful.push(upper);
+        }
+    }
+
+    match meaningful.len() {
+        0 => true,
+        1 => is_stub_return(&meaningful[0]),
+        _ => false,
+    }
+}
+
+fn is_new_declaration(upper: &str) -> bool {
+    upper.starts_with("FUNCTION ")
+        || upper.starts_with("PROCEDURE ")
+        || upper.starts_with("STATIC FUNCTION ")
+        || upper.starts_with("STATIC PROCEDURE ")
+        || upper.starts_with("CLASS ")
+        || upper.starts_with("ENDCLASS")
+        || upper == "END CLASS"
+        || upper.starts_with("METHOD ")
+}
+
+fn is_stub_return(line: &str) -> bool {
+    if line == "RETURN" {
+        return true;
+    }
+    if let Some(val) = line.strip_prefix("RETURN ") {
+        return is_literal(val.trim());
+    }
+    false
+}
+
+fn is_literal(val: &str) -> bool {
+    if matches!(val, "" | "NIL" | ".T." | ".F." | ".TRUE." | ".FALSE.") {
+        return true;
+    }
+    if val.parse::<f64>().is_ok() {
+        return true;
+    }
+    if val.len() >= 2 {
+        let b = val.as_bytes();
+        if (b[0] == b'"' && b[val.len() - 1] == b'"')
+            || (b[0] == b'\'' && b[val.len() - 1] == b'\'')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -712,9 +788,100 @@ mod tests {
         assert_eq!(parse_static_keyword("FUNCTION Foo", "FUNCTION"), None);
     }
 
+    // ── stub detection ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stub_empty_body_ignored() {
+        // PROCEDURE sem corpo (next declaration imediatamente)
+        let source = "PROCEDURE Stub\n\nPROCEDURE Real\n  LOCAL x\n  x := 1\nRETURN\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"STUB"), "PROCEDURE vazio deve ser ignorado");
+        assert!(names.contains(&"REAL"), "PROCEDURE com corpo deve ser registrado");
+    }
+
+    #[test]
+    fn test_stub_return_nil_ignored() {
+        let source = "FUNCTION StubFunc\nRETURN NIL\n\nFUNCTION RealFunc\n  LOCAL x := Calculate()\nRETURN x\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"STUBFUNC"), "FUNCTION com RETURN NIL deve ser ignorada");
+        assert!(names.contains(&"REALFUNC"), "FUNCTION com corpo real deve ser registrada");
+    }
+
+    #[test]
+    fn test_stub_return_fixed_literals_ignored() {
+        let source = concat!(
+            "FUNCTION StubBool\nRETURN .F.\n\n",
+            "FUNCTION StubNum\nRETURN 0\n\n",
+            "FUNCTION StubStr\nRETURN \"\"\n\n",
+            "FUNCTION Real\n  LOCAL x\n  x := DoSomething()\nRETURN x\n",
+        );
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"STUBBOOL"), "RETURN .F. deve ser stub");
+        assert!(!names.contains(&"STUBNUM"), "RETURN 0 deve ser stub");
+        assert!(!names.contains(&"STUBSTR"), "RETURN \"\" deve ser stub");
+        assert!(names.contains(&"REAL"), "funcao real deve ser registrada");
+    }
+
+    #[test]
+    fn test_stub_bare_return_procedure_ignored() {
+        let source = "PROCEDURE Stub\nRETURN\n\nPROCEDURE WithBody\n  DoSomething()\nRETURN\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"STUB"), "PROCEDURE com só RETURN deve ser ignorado");
+        assert!(names.contains(&"WITHBODY"), "PROCEDURE com corpo deve ser registrado");
+    }
+
+    #[test]
+    fn test_non_stub_with_logic_registered() {
+        // RETURN NIL mas tem lógica antes — não é stub
+        let source = "FUNCTION NotAStub\n  LOCAL x\n  x := SomeCall()\nRETURN NIL\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"NOTASTUB"), "funcao com logica nao deve ser ignorada mesmo com RETURN NIL");
+    }
+
+    #[test]
+    fn test_is_literal_values() {
+        assert!(is_literal("NIL"));
+        assert!(is_literal(".T."));
+        assert!(is_literal(".F."));
+        assert!(is_literal(".TRUE."));
+        assert!(is_literal(".FALSE."));
+        assert!(is_literal("0"));
+        assert!(is_literal("42"));
+        assert!(is_literal("3.14"));
+        assert!(is_literal("\"\""));
+        assert!(is_literal("\"hello\""));
+        assert!(is_literal("''"));
+        assert!(is_literal("'abc'"));
+        assert!(!is_literal("xVar"));
+        assert!(!is_literal("SomeFunc()"));
+        assert!(!is_literal("oObj:Val"));
+    }
+
+    #[test]
+    fn test_is_stub_return_variants() {
+        assert!(is_stub_return("RETURN"));
+        assert!(is_stub_return("RETURN NIL"));
+        assert!(is_stub_return("RETURN .F."));
+        assert!(is_stub_return("RETURN 0"));
+        assert!(is_stub_return("RETURN \"\""));
+        assert!(!is_stub_return("RETURN xVar"));
+        assert!(!is_stub_return("RETURN SomeCall()"));
+        assert!(!is_stub_return("LOCAL x"));
+    }
+
     #[test]
     fn test_static_function_registered_as_symbol() {
-        let source = "STATIC FUNCTION InternalHelper()\nRETURN NIL\n\nFUNCTION Caller()\n  InternalHelper()\nRETURN NIL\n";
+        let source = "STATIC FUNCTION InternalHelper()\n  LOCAL x := 1\nRETURN x\n\nFUNCTION Caller()\n  InternalHelper()\nRETURN NIL\n";
         let mut parser = Parser::new(source);
         parser.run();
         let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
@@ -728,7 +895,7 @@ mod tests {
 
     #[test]
     fn test_static_procedure_registered_as_symbol() {
-        let source = "STATIC PROCEDURE InternalProc()\nRETURN\n\nPROCEDURE Main()\n  InternalProc()\nRETURN\n";
+        let source = "STATIC PROCEDURE InternalProc()\n  LOCAL x\n  x := DoWork()\nRETURN\n\nPROCEDURE Main()\n  InternalProc()\nRETURN\n";
         let mut parser = Parser::new(source);
         parser.run();
         let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
@@ -740,12 +907,12 @@ mod tests {
     }
 
     #[test]
-    fn test_static_function_has_static_attribute() {
-        let source = "STATIC FUNCTION InternalHelper()\nRETURN NIL\n";
+    fn test_static_function_has_static_scope() {
+        let source = "STATIC FUNCTION InternalHelper()\n  LOCAL x := 1\nRETURN x\n";
         let mut parser = Parser::new(source);
         parser.run();
         let sym = parser.symbols.iter().find(|s| s.name == "INTERNALHELPER").unwrap();
-        assert!(sym.attributes.contains(&String::from("STATIC")));
+        assert_eq!(sym.scope, "STATIC");
         assert_eq!(sym.kind, SymbolKind::Function);
     }
 }
