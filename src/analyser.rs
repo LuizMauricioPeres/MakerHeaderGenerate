@@ -23,6 +23,7 @@ pub fn analyse_file(path: &Path) -> Result<Manifest, String> {
         md5: digest,
         symbols: parser.symbols,
         usages: parser.usages,
+        call_sites: parser.call_sites,
     })
 }
 
@@ -32,6 +33,7 @@ struct Parser {
     lines: Vec<String>,
     pub symbols: Vec<Symbol>,
     pub usages: Vec<Usage>,
+    pub call_sites: Vec<Usage>,
     cond_stack: Vec<CondState>,
     current_class: Option<String>,
     current_scope: String,
@@ -50,6 +52,7 @@ impl Parser {
             lines: source.lines().map(|s| s.to_string()).collect(),
             symbols: Vec::new(),
             usages: Vec::new(),
+            call_sites: Vec::new(),
             cond_stack: Vec::new(),
             current_class: None,
             current_scope: String::from("GLOBAL"),
@@ -210,7 +213,37 @@ impl Parser {
                 continue;
             }
 
-            // ── STATIC ──────────────────────────────────────────────────────
+            // ── STATIC FUNCTION ─────────────────────────────────────────────
+            if let Some(name) = parse_static_keyword(upper, "FUNCTION") {
+                let sym = Symbol {
+                    name: name.clone(),
+                    kind: SymbolKind::Function,
+                    scope: String::from("STATIC"),
+                    line: lineno,
+                    attributes: vec![],
+                    conditional: in_cond,
+                };
+                self.current_scope = name;
+                self.push_symbol(sym);
+                continue;
+            }
+
+            // ── STATIC PROCEDURE ────────────────────────────────────────────
+            if let Some(name) = parse_static_keyword(upper, "PROCEDURE") {
+                let sym = Symbol {
+                    name: name.clone(),
+                    kind: SymbolKind::Procedure,
+                    scope: String::from("STATIC"),
+                    line: lineno,
+                    attributes: vec![],
+                    conditional: in_cond,
+                };
+                self.current_scope = name;
+                self.push_symbol(sym);
+                continue;
+            }
+
+            // ── STATIC (variables) ──────────────────────────────────────────
             if upper.starts_with("STATIC ") || upper == "STATIC" {
                 let scope = self.current_scope.clone();
                 for vname in parse_varlist(&trimmed) {
@@ -283,18 +316,19 @@ impl Parser {
             let calls = collect_calls(&trimmed, lineno);
             for u in calls {
                 let upper = u.name.to_ascii_uppercase();
-                if !self.defined.contains(&upper) && !is_keyword(&upper) {
-                    self.usages.push(Usage {
-                        name: upper,
-                        line: u.line,
-                        col: u.col,
-                    });
+                if self.defined.contains(&upper) {
+                    self.call_sites.push(Usage { name: upper, line: u.line, col: u.col });
+                } else if !is_keyword(&upper) {
+                    self.usages.push(Usage { name: upper, line: u.line, col: u.col });
                 }
             }
         }
 
         self.usages.sort_by(|a, b| a.line.cmp(&b.line).then(a.col.cmp(&b.col)));
         self.usages.dedup_by(|a, b| a.name == b.name && a.line == b.line && a.col == b.col);
+
+        self.call_sites.sort_by(|a, b| a.line.cmp(&b.line).then(a.col.cmp(&b.col)));
+        self.call_sites.dedup_by(|a, b| a.name == b.name && a.line == b.line && a.col == b.col);
     }
 }
 
@@ -368,6 +402,21 @@ fn parse_method(upper: &str) -> Option<String> {
 /// Parse "KEYWORD name" → Some("NAME")
 fn parse_keyword(upper: &str, kw: &str) -> Option<String> {
     let prefix = format!("{} ", kw);
+    if upper.starts_with(&prefix) {
+        let rest = upper[prefix.len()..].trim();
+        let name: String = rest
+            .chars()
+            .take_while(|&c| c != '(' && c != ' ' && c != '\t' && c != ':')
+            .collect();
+        if name.is_empty() { None } else { Some(name) }
+    } else {
+        None
+    }
+}
+
+/// Parse "STATIC KEYWORD name" → Some("NAME")
+fn parse_static_keyword(upper: &str, kw: &str) -> Option<String> {
+    let prefix = format!("STATIC {} ", kw);
     if upper.starts_with(&prefix) {
         let rest = upper[prefix.len()..].trim();
         let name: String = rest
@@ -638,5 +687,65 @@ mod tests {
         let line = "x := y + z";
         let calls = collect_calls(line, 1);
         assert_eq!(calls.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_static_keyword_function() {
+        // Input já em maiúsculas (como chega do parser em produção)
+        assert_eq!(
+            parse_static_keyword("STATIC FUNCTION FOOBAR", "FUNCTION"),
+            Some("FOOBAR".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_static_keyword_procedure() {
+        assert_eq!(
+            parse_static_keyword("STATIC PROCEDURE BARBAZ()", "PROCEDURE"),
+            Some("BARBAZ".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_static_keyword_no_match() {
+        assert_eq!(parse_static_keyword("STATIC nVar", "FUNCTION"), None);
+        assert_eq!(parse_static_keyword("FUNCTION Foo", "FUNCTION"), None);
+    }
+
+    #[test]
+    fn test_static_function_registered_as_symbol() {
+        let source = "STATIC FUNCTION InternalHelper()\nRETURN NIL\n\nFUNCTION Caller()\n  InternalHelper()\nRETURN NIL\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"INTERNALHELPER"), "STATIC FUNCTION deve ser símbolo definido");
+        // Não deve aparecer como dependência externa
+        assert!(
+            parser.usages.iter().all(|u| u.name != "INTERNALHELPER"),
+            "STATIC FUNCTION não deve ser marcada como dependência externa"
+        );
+    }
+
+    #[test]
+    fn test_static_procedure_registered_as_symbol() {
+        let source = "STATIC PROCEDURE InternalProc()\nRETURN\n\nPROCEDURE Main()\n  InternalProc()\nRETURN\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let names: Vec<&str> = parser.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"INTERNALPROC"), "STATIC PROCEDURE deve ser símbolo definido");
+        assert!(
+            parser.usages.iter().all(|u| u.name != "INTERNALPROC"),
+            "STATIC PROCEDURE não deve ser marcada como dependência externa"
+        );
+    }
+
+    #[test]
+    fn test_static_function_has_static_attribute() {
+        let source = "STATIC FUNCTION InternalHelper()\nRETURN NIL\n";
+        let mut parser = Parser::new(source);
+        parser.run();
+        let sym = parser.symbols.iter().find(|s| s.name == "INTERNALHELPER").unwrap();
+        assert!(sym.attributes.contains(&String::from("STATIC")));
+        assert_eq!(sym.kind, SymbolKind::Function);
     }
 }

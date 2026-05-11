@@ -46,7 +46,10 @@ pub struct Manifest {
     pub source_path: String,
     pub md5: String,
     pub symbols: Vec<Symbol>,
+    /// Chamadas a símbolos *externos* (não definidos neste arquivo)
     pub usages: Vec<Usage>,
+    /// Chamadas a símbolos *internos* (definidos neste arquivo)
+    pub call_sites: Vec<Usage>,
 }
 
 #[cfg(test)]
@@ -134,6 +137,7 @@ mod tests {
             md5: "abc123".to_string(),
             symbols: vec![],
             usages: vec![],
+            call_sites: vec![],
         };
 
         assert_eq!(manifest.source_path, "test.prg");
@@ -167,6 +171,7 @@ mod tests {
             md5: "abc123".to_string(),
             symbols: vec![symbol1, symbol2],
             usages: vec![],
+            call_sites: vec![],
         };
 
         assert_eq!(manifest.symbols.len(), 2);

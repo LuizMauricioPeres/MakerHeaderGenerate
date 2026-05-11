@@ -45,9 +45,12 @@ fn render_mkh(m: &Manifest) -> String {
     buf.push_str("; ------------------------------------------------------------\n\n");
 
     // ── symbol definitions ────────────────────────────────────────────────────
+    let sites_map = group_usages(&m.call_sites);
     buf.push_str("[DEFINITIONS]\n");
     for sym in &m.symbols {
-        buf.push_str(&format_symbol(sym));
+        let key = sym.name.to_ascii_uppercase();
+        let sites = sites_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        buf.push_str(&format_symbol(sym, sites));
         buf.push('\n');
     }
 
@@ -73,7 +76,7 @@ fn group_usages(usages: &[Usage]) -> BTreeMap<String, Vec<(usize, usize)>> {
     map
 }
 
-fn format_symbol(sym: &Symbol) -> String {
+fn format_symbol(sym: &Symbol, call_sites: &[(usize, usize)]) -> String {
     let tipo = kind_str(&sym.kind);
     let mut attrs: Vec<String> = sym.attributes.clone();
     if sym.conditional {
@@ -82,14 +85,21 @@ fn format_symbol(sym: &Symbol) -> String {
     if let SymbolKind::ClassVar { visibility } = &sym.kind {
         attrs.push(vis_str(visibility).to_string());
     }
-    let attrs_str = if attrs.is_empty() {
-        String::from("-")
+
+    let last_field = if call_sites.is_empty() {
+        if attrs.is_empty() { String::from("-") } else { attrs.join(",") }
     } else {
-        attrs.join(",")
+        let locs: Vec<String> = call_sites
+            .iter()
+            .map(|(l, c)| format!("[Linha:{}, Coluna:{}]", l, c))
+            .collect();
+        let usos = format!("USOS: {{ {} }}", locs.join(", "));
+        if attrs.is_empty() { usos } else { format!("{} | {}", attrs.join(","), usos) }
     };
+
     format!(
         "[SYMBOL] -> [{}] -> {} | {} | {} | {}",
-        tipo, sym.name, sym.scope, sym.line, attrs_str
+        tipo, sym.name, sym.scope, sym.line, last_field
     )
 }
 
@@ -130,8 +140,11 @@ pub fn render_stdout(m: &Manifest) -> String {
     out.push_str(&format!("=== {} (md5: {})\n", m.source_path, m.md5));
     out.push_str(&format!("  Symbols  : {}\n", m.symbols.len()));
     out.push_str(&format!("  Usages   : {}\n", m.usages.len()));
+    let sites_map = group_usages(&m.call_sites);
     for sym in &m.symbols {
-        out.push_str(&format!("  {}\n", format_symbol(sym)));
+        let key = sym.name.to_ascii_uppercase();
+        let sites = sites_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        out.push_str(&format!("  {}\n", format_symbol(sym, sites)));
     }
     for (name, coords) in group_usages(&m.usages) {
         out.push_str(&format!("  {}\n", format_usage_grouped(&name, &coords)));
@@ -192,7 +205,7 @@ mod tests {
             conditional: false,
         };
 
-        let formatted = format_symbol(&symbol);
+        let formatted = format_symbol(&symbol, &[]);
         assert!(formatted.contains("[SYMBOL]"));
         assert!(formatted.contains("[FUNCTION]"));
         assert!(formatted.contains("MyFunc"));
@@ -212,7 +225,7 @@ mod tests {
             conditional: true,
         };
 
-        let formatted = format_symbol(&symbol);
+        let formatted = format_symbol(&symbol, &[]);
         assert!(formatted.contains("CONDITIONAL"));
     }
 
@@ -227,7 +240,7 @@ mod tests {
             conditional: false,
         };
 
-        let formatted = format_symbol(&symbol);
+        let formatted = format_symbol(&symbol, &[]);
         assert!(formatted.contains("DEFAULT"));
         assert!(formatted.contains("INIT"));
     }
@@ -245,7 +258,7 @@ mod tests {
             conditional: false,
         };
 
-        let formatted = format_symbol(&symbol);
+        let formatted = format_symbol(&symbol, &[]);
         assert!(formatted.contains("VAR"));
         assert!(formatted.contains("EXPORTED"));
     }
@@ -263,8 +276,43 @@ mod tests {
             conditional: false,
         };
 
-        let formatted = format_symbol(&symbol);
+        let formatted = format_symbol(&symbol, &[]);
         assert!(formatted.contains("HIDDEN"));
+    }
+
+    #[test]
+    fn test_format_symbol_with_call_sites() {
+        let symbol = Symbol {
+            name: "MYHELPER".to_string(),
+            kind: SymbolKind::Function,
+            scope: "STATIC".to_string(),
+            line: 10,
+            attributes: vec![],
+            conditional: false,
+        };
+
+        let sites = [(20, 5), (30, 3)];
+        let formatted = format_symbol(&symbol, &sites);
+        assert!(formatted.contains("USOS:"));
+        assert!(formatted.contains("Linha:20, Coluna:5"));
+        assert!(formatted.contains("Linha:30, Coluna:3"));
+    }
+
+    #[test]
+    fn test_format_symbol_conditional_with_call_sites() {
+        let symbol = Symbol {
+            name: "OPTFUNC".to_string(),
+            kind: SymbolKind::Function,
+            scope: "GLOBAL".to_string(),
+            line: 5,
+            attributes: vec![],
+            conditional: true,
+        };
+
+        let sites = [(15, 1)];
+        let formatted = format_symbol(&symbol, &sites);
+        assert!(formatted.contains("CONDITIONAL"));
+        assert!(formatted.contains("USOS:"));
     }
 
     #[test]
@@ -342,6 +390,7 @@ mod tests {
             md5: "abc123def456".to_string(),
             symbols: vec![],
             usages: vec![],
+            call_sites: vec![],
         };
 
         let rendered = render_mkh(&manifest);
@@ -369,6 +418,7 @@ mod tests {
             md5: "abc123".to_string(),
             symbols: vec![symbol],
             usages: vec![],
+            call_sites: vec![],
         };
 
         let rendered = render_mkh(&manifest);
@@ -400,6 +450,7 @@ mod tests {
             md5: "abc123".to_string(),
             symbols: vec![symbol],
             usages: vec![usage],
+            call_sites: vec![],
         };
 
         let output = render_stdout(&manifest);
