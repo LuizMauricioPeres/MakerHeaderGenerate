@@ -134,6 +134,109 @@ fn vis_str(v: &Visibility) -> &'static str {
     }
 }
 
+/// Render all manifests as `.vscode/hpts.json` symbol index.
+pub fn render_hpts(manifests: &[&Manifest]) -> String {
+    let mut entries: Vec<(&str, &str, usize, &'static str)> = Vec::new();
+
+    for m in manifests {
+        for sym in &m.symbols {
+            entries.push((&sym.name, &m.source_path, sym.line, hpts_type(&sym.kind)));
+        }
+    }
+
+    if entries.is_empty() {
+        return String::from("[]");
+    }
+
+    let mut buf = String::with_capacity(entries.len() * 80 + 4);
+    buf.push_str("[\n");
+
+    for (i, (name, path, line, typ)) in entries.iter().enumerate() {
+        let comma = if i + 1 < entries.len() { "," } else { "" };
+        buf.push_str(&format!(
+            "  {{ \"name\": \"{}\", \"filename\": \"{}\", \"line\": {}, \"type\": \"{}\" }}{}\n",
+            json_escape(name),
+            json_escape(path),
+            line,
+            typ,
+            comma,
+        ));
+    }
+
+    buf.push(']');
+    buf
+}
+
+fn hpts_type(k: &SymbolKind) -> &'static str {
+    match k {
+        SymbolKind::Function => "function",
+        SymbolKind::Procedure => "procedure",
+        SymbolKind::Method => "method",
+        SymbolKind::Class => "class",
+        SymbolKind::Public => "public",
+        SymbolKind::Static => "static",
+        SymbolKind::Memvar => "memvar",
+        SymbolKind::ClassVar { .. } => "var",
+        SymbolKind::Access => "access",
+        SymbolKind::Assign => "assign",
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    s.chars().flat_map(|c| match c {
+        '"'  => vec!['\\', '"'],
+        '\\' => vec!['\\', '\\'],
+        '\n' => vec!['\\', 'n'],
+        '\r' => vec!['\\', 'r'],
+        '\t' => vec!['\\', 't'],
+        c    => vec![c],
+    }).collect()
+}
+
+/// Render all manifests as a Universal ctags (format 2) `tags` file.
+/// Sort is foldcase (case-insensitive), matching Harbour's case-insensitivity.
+pub fn render_ctags(manifests: &[&Manifest]) -> String {
+    let mut entries: Vec<(String, &str, usize, &'static str, Option<&str>)> = Vec::new();
+
+    for m in manifests {
+        for sym in &m.symbols {
+            let scope = match sym.scope.as_str() {
+                "GLOBAL" | "STATIC" => None,
+                s => Some(s),
+            };
+            entries.push((sym.name.clone(), &m.source_path, sym.line, ctags_kind(&sym.kind), scope));
+        }
+    }
+
+    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+
+    let mut buf = String::with_capacity(entries.len() * 80 + 256);
+    buf.push_str("!_TAG_FILE_FORMAT\t2\t/extended format/\n");
+    buf.push_str("!_TAG_FILE_SORTED\t2\t/0=unsorted, 1=sorted, 2=foldcase/\n");
+    buf.push_str("!_TAG_PROGRAM_NAME\tmaker_header_gen\t//\n");
+
+    for (name, path, line, kind, scope) in &entries {
+        if let Some(s) = scope {
+            buf.push_str(&format!("{}\t{}\t{};\"\t{}\tclass:{}\n", name, path, line, kind, s));
+        } else {
+            buf.push_str(&format!("{}\t{}\t{};\"\t{}\n", name, path, line, kind));
+        }
+    }
+
+    buf
+}
+
+fn ctags_kind(k: &SymbolKind) -> &'static str {
+    match k {
+        SymbolKind::Function => "f",
+        SymbolKind::Procedure => "p",
+        SymbolKind::Method | SymbolKind::Access | SymbolKind::Assign => "m",
+        SymbolKind::Class => "c",
+        SymbolKind::Public | SymbolKind::Static | SymbolKind::Memvar => "v",
+        SymbolKind::ClassVar { .. } => "m",
+    }
+}
+
 /// Human-readable stdout rendering (for --verbose)
 pub fn render_stdout(m: &Manifest) -> String {
     let mut out = String::new();
@@ -426,6 +529,270 @@ mod tests {
         assert!(rendered.contains("[SYMBOL]"));
         assert!(rendered.contains("[FUNCTION]"));
         assert!(rendered.contains("MYFUNCTION"));
+    }
+
+    #[test]
+    fn test_hpts_type_mapping() {
+        assert_eq!(hpts_type(&SymbolKind::Function), "function");
+        assert_eq!(hpts_type(&SymbolKind::Procedure), "procedure");
+        assert_eq!(hpts_type(&SymbolKind::Method), "method");
+        assert_eq!(hpts_type(&SymbolKind::Class), "class");
+        assert_eq!(hpts_type(&SymbolKind::Public), "public");
+        assert_eq!(hpts_type(&SymbolKind::Static), "static");
+        assert_eq!(hpts_type(&SymbolKind::Memvar), "memvar");
+        assert_eq!(hpts_type(&SymbolKind::Access), "access");
+        assert_eq!(hpts_type(&SymbolKind::Assign), "assign");
+        assert_eq!(hpts_type(&SymbolKind::ClassVar { visibility: Visibility::Hidden }), "var");
+    }
+
+    #[test]
+    fn test_render_hpts_empty() {
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_hpts(&[&manifest]);
+        assert_eq!(out.trim(), "[]");
+    }
+
+    #[test]
+    fn test_render_hpts_single_symbol() {
+        let symbol = Symbol {
+            name: "GetUser".to_string(),
+            kind: SymbolKind::Function,
+            scope: "GLOBAL".to_string(),
+            line: 12,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![symbol],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_hpts(&[&manifest]);
+        assert!(out.contains("\"name\": \"GetUser\""));
+        assert!(out.contains("\"filename\": \"src/foo.prg\""));
+        assert!(out.contains("\"line\": 12"));
+        assert!(out.contains("\"type\": \"function\""));
+        // single entry → sem vírgula no final
+        assert!(!out.trim_end().trim_end_matches(']').trim_end().ends_with(','));
+    }
+
+    #[test]
+    fn test_render_hpts_multiple_symbols_trailing_comma() {
+        let make = |name: &str, line: usize| Symbol {
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            scope: "GLOBAL".to_string(),
+            line,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/a.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![make("Foo", 1), make("Bar", 5)],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_hpts(&[&manifest]);
+        // Foo deve ter vírgula, Bar não
+        let foo_line = out.lines().find(|l| l.contains("\"Foo\"")).unwrap();
+        let bar_line = out.lines().find(|l| l.contains("\"Bar\"")).unwrap();
+        assert!(foo_line.ends_with(','));
+        assert!(!bar_line.ends_with(','));
+    }
+
+    #[test]
+    fn test_render_hpts_json_escape() {
+        let symbol = Symbol {
+            name: "My\"Func".to_string(),
+            kind: SymbolKind::Function,
+            scope: "GLOBAL".to_string(),
+            line: 1,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "path\\to\\file.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![symbol],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_hpts(&[&manifest]);
+        assert!(out.contains("My\\\"Func"));
+        assert!(out.contains("path\\\\to\\\\file.prg"));
+    }
+
+    #[test]
+    fn test_render_hpts_valid_json_structure() {
+        let symbol = Symbol {
+            name: "Init".to_string(),
+            kind: SymbolKind::Method,
+            scope: "MyClass".to_string(),
+            line: 20,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/myclass.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![symbol],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_hpts(&[&manifest]);
+        assert!(out.starts_with('['));
+        assert!(out.ends_with(']'));
+        assert!(out.contains("\"type\": \"method\""));
+    }
+
+    #[test]
+    fn test_ctags_kind_mapping() {
+        assert_eq!(ctags_kind(&SymbolKind::Function), "f");
+        assert_eq!(ctags_kind(&SymbolKind::Procedure), "p");
+        assert_eq!(ctags_kind(&SymbolKind::Method), "m");
+        assert_eq!(ctags_kind(&SymbolKind::Class), "c");
+        assert_eq!(ctags_kind(&SymbolKind::Public), "v");
+        assert_eq!(ctags_kind(&SymbolKind::Static), "v");
+        assert_eq!(ctags_kind(&SymbolKind::Memvar), "v");
+        assert_eq!(ctags_kind(&SymbolKind::Access), "m");
+        assert_eq!(ctags_kind(&SymbolKind::Assign), "m");
+        assert_eq!(ctags_kind(&SymbolKind::ClassVar { visibility: Visibility::Exported }), "m");
+    }
+
+    #[test]
+    fn test_render_ctags_header() {
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_ctags(&[&manifest]);
+        assert!(out.contains("!_TAG_FILE_FORMAT\t2"));
+        assert!(out.contains("!_TAG_FILE_SORTED\t2"));
+        assert!(out.contains("!_TAG_PROGRAM_NAME\tmaker_header_gen"));
+    }
+
+    #[test]
+    fn test_render_ctags_global_symbol() {
+        let symbol = Symbol {
+            name: "GetUser".to_string(),
+            kind: SymbolKind::Function,
+            scope: "GLOBAL".to_string(),
+            line: 12,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![symbol],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_ctags(&[&manifest]);
+        assert!(out.contains("GetUser\tsrc/foo.prg\t12;\"\tf\n"));
+        assert!(!out.contains("class:"));
+    }
+
+    #[test]
+    fn test_render_ctags_class_member_has_class_field() {
+        let symbol = Symbol {
+            name: "Save".to_string(),
+            kind: SymbolKind::Method,
+            scope: "MyClass".to_string(),
+            line: 30,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![symbol],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_ctags(&[&manifest]);
+        assert!(out.contains("Save\tsrc/foo.prg\t30;\"\tm\tclass:MyClass"));
+    }
+
+    #[test]
+    fn test_render_ctags_static_scope_no_class_field() {
+        let symbol = Symbol {
+            name: "InternalHelper".to_string(),
+            kind: SymbolKind::Function,
+            scope: "STATIC".to_string(),
+            line: 5,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![symbol],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_ctags(&[&manifest]);
+        assert!(out.contains("InternalHelper\tsrc/foo.prg\t5;\"\tf\n"));
+        assert!(!out.contains("class:"));
+    }
+
+    #[test]
+    fn test_render_ctags_sorted_foldcase() {
+        let make_sym = |name: &str, line: usize| Symbol {
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            scope: "GLOBAL".to_string(),
+            line,
+            attributes: vec![],
+            conditional: false,
+        };
+        let manifest = Manifest {
+            source_path: "src/foo.prg".to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![make_sym("Zebra", 3), make_sym("apple", 1), make_sym("Banana", 2)],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let out = render_ctags(&[&manifest]);
+        let pos_apple = out.find("apple").unwrap();
+        let pos_banana = out.find("Banana").unwrap();
+        let pos_zebra = out.find("Zebra").unwrap();
+        assert!(pos_apple < pos_banana && pos_banana < pos_zebra);
+    }
+
+    #[test]
+    fn test_render_ctags_multiple_manifests() {
+        let make_manifest = |path: &str, name: &str, line: usize| Manifest {
+            source_path: path.to_string(),
+            md5: "abc".to_string(),
+            symbols: vec![Symbol {
+                name: name.to_string(),
+                kind: SymbolKind::Function,
+                scope: "GLOBAL".to_string(),
+                line,
+                attributes: vec![],
+                conditional: false,
+            }],
+            usages: vec![],
+            call_sites: vec![],
+        };
+        let m1 = make_manifest("src/a.prg", "FuncA", 1);
+        let m2 = make_manifest("src/b.prg", "FuncB", 5);
+        let out = render_ctags(&[&m1, &m2]);
+        assert!(out.contains("FuncA\tsrc/a.prg\t1;\"\tf"));
+        assert!(out.contains("FuncB\tsrc/b.prg\t5;\"\tf"));
     }
 
     #[test]
